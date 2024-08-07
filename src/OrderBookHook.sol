@@ -16,6 +16,10 @@ import {FixedPointMathLib} from "@uniswap/v4-core/lib/solmate/src/utils/FixedPoi
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract OrderBookHook is BaseHook, ERC1155 {
+    //Custom Errors
+    error OBH__NoClaimableOutputTokenAvailable();
+    error OBH__InsufficientInputBalanceToRedeem();
+
     using CurrencyLibrary for Currency;
     using StateLibrary for IPoolManager;
     using PoolIdLibrary for PoolKey;
@@ -26,6 +30,15 @@ contract OrderBookHook is BaseHook, ERC1155 {
 
     mapping(uint256 _positionId => uint256 _inputTokens)
         public claimTokensSupply;
+
+    mapping(uint256 positionId => uint256) public claimableOutputTokens;
+
+    event OrderCancelled(
+        PoolKey key,
+        int24 tick,
+        bool zeroForOne,
+        address caller
+    );
 
     constructor(
         IPoolManager manager,
@@ -90,9 +103,93 @@ contract OrderBookHook is BaseHook, ERC1155 {
 
     function cancelOrder(
         PoolKey calldata key,
-        int24 tick,
+        int24 tickToSellAt,
         bool zeroForOne
-    ) public {}
+    ) public {
+        int24 tick = _validTickToSellAt(tickToSellAt, key.tickSpacing);
+
+        uint256 positionId = _getPositionId(key, tick, zeroForOne);
+
+        uint256 tokenAmount = balanceOf(msg.sender, positionId);
+
+        claimTokensSupply[positionId] -= tokenAmount;
+
+        _burn(msg.sender, positionId, tokenAmount);
+
+        Currency tokenToSend = zeroForOne ? key.currency0 : key.currency1;
+
+        tokenToSend.transfer(msg.sender, tokenAmount);
+        emit OrderCancelled(key, tick, zeroForOne, msg.sender);
+    }
+
+    function redeemOrderedTokens(
+        PoolKey calldata key,
+        int24 tickToSellAt,
+        bool zeroForOne,
+        uint256 inputAmountToClaimFor
+    ) public {
+        int24 tick = _validTickToSellAt(tickToSellAt, key.tickSpacing);
+
+        uint256 positionId = _getPositionId(key, tick, zeroForOne);
+        if (claimableOutputTokens[positionId] == 0)
+            revert OBH__NoClaimableOutputTokenAvailable();
+
+        uint256 userInputAmount = balanceOf(msg.sender, positionId);
+        if (inputAmountToClaimFor > userInputAmount)
+            revert OBH__InsufficientInputBalanceToRedeem();
+
+        //totalClaimable Reward for userInput= totalClaimableOutput*inputAmountOfUser/totalInputAmount for this partcicular positionId
+        uint256 totalOutputTokensAvailableAtThisPosition = claimableOutputTokens[
+                positionId
+            ];
+
+        uint256 totalInputAmountsAtThisPosition = claimTokensSupply[positionId];
+
+        _burn(msg.sender, positionId, userInputAmount);
+
+        uint256 thisUserClaimableOutput = (
+            totalOutputTokensAvailableAtThisPosition.mulDivDown(
+                userInputAmount,
+                totalInputAmountsAtThisPosition
+            )
+        );
+
+        claimTokensSupply[positionId] -= inputAmountToClaimFor;
+        claimableOutputTokens[positionId] -= thisUserClaimableOutput;
+
+        Currency outputTokenAddress = zeroForOne
+            ? key.currency1
+            : key.currency0;
+
+        outputTokenAddress.transfer(msg.sender, thisUserClaimableOutput);
+    }
+
+    function swapAndSettleBalances(
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata params
+    ) public {
+        BalanceDelta swapDelta = poolManager.swap(key, params, "");
+        if (params.zeroForOne) {
+            if (swapDelta.amount0() < 0) {
+                _settle(key.currency0, uint128(swapDelta.amount0()));
+            }
+            if (swapDelta.amount1() > 0) {
+                _take(key.currency1, uint128(swapDelta.amount1()));
+            }
+        }
+    }
+
+    function _settle(Currency currency, uint128 amount) internal {
+        poolManager.sync(currency);
+        currency.transfer(address(poolManager), amount);
+        poolManager.settle();
+    }
+
+    function _take(Currency currency, uint256 amount) internal {
+        poolManager.take(currency, address(this), amount);
+    }
+
+    function execute() public {}
 
     function _validTickToSellAt(
         int24 tickToSellAt,
@@ -113,7 +210,7 @@ contract OrderBookHook is BaseHook, ERC1155 {
         PoolKey calldata key,
         int24 tick,
         bool zeroForOne
-    ) public returns (uint256) {
+    ) public pure returns (uint256) {
         return uint256(keccak256(abi.encode(key.toId(), tick, zeroForOne)));
     }
 }
