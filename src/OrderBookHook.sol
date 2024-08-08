@@ -33,6 +33,8 @@ contract OrderBookHook is BaseHook, ERC1155 {
 
     mapping(uint256 positionId => uint256) public claimableOutputTokens;
 
+    mapping(PoolId => int24 lastTick) public lastTicks;
+
     event OrderCancelled(
         PoolKey key,
         int24 tick,
@@ -78,7 +80,7 @@ contract OrderBookHook is BaseHook, ERC1155 {
         bool zeroForOne,
         uint256 inputAmount
     ) public returns (int24) {
-        int24 tick = _validTickToSellAt(tickToSellAt, tickSpacing);
+        int24 tick = _validTickToSwapAt(tickToSellAt, tickSpacing);
 
         //Holds the pending order inputToken's value for this particular tick & id
         pendingOrders[key.toId()][tick][zeroForOne] += inputAmount;
@@ -106,7 +108,7 @@ contract OrderBookHook is BaseHook, ERC1155 {
         int24 tickToSellAt,
         bool zeroForOne
     ) public {
-        int24 tick = _validTickToSellAt(tickToSellAt, key.tickSpacing);
+        int24 tick = _validTickToSwapAt(tickToSellAt, key.tickSpacing);
 
         uint256 positionId = _getPositionId(key, tick, zeroForOne);
 
@@ -128,7 +130,7 @@ contract OrderBookHook is BaseHook, ERC1155 {
         bool zeroForOne,
         uint256 inputAmountToClaimFor
     ) public {
-        int24 tick = _validTickToSellAt(tickToSellAt, key.tickSpacing);
+        int24 tick = _validTickToSwapAt(tickToSellAt, key.tickSpacing);
 
         uint256 positionId = _getPositionId(key, tick, zeroForOne);
         if (claimableOutputTokens[positionId] == 0)
@@ -166,32 +168,132 @@ contract OrderBookHook is BaseHook, ERC1155 {
 
     function swapAndSettleBalances(
         PoolKey calldata key,
-        IPoolManager.SwapParams calldata params
-    ) public {
+        IPoolManager.SwapParams memory params
+    ) internal returns (BalanceDelta) {
         BalanceDelta swapDelta = poolManager.swap(key, params, "");
         if (params.zeroForOne) {
             if (swapDelta.amount0() < 0) {
-                _settle(key.currency0, uint128(swapDelta.amount0()));
+                _settle(key.currency0, uint128(-swapDelta.amount0()));
             }
             if (swapDelta.amount1() > 0) {
                 _take(key.currency1, uint128(swapDelta.amount1()));
             }
+        } else {
+            if (swapDelta.amount1() < 0) {
+                _settle(key.currency1, uint128(-swapDelta.amount1()));
+            }
+            if (swapDelta.amount0() > 0) {
+                _take(key.currency0, uint128(swapDelta.amount0()));
+            }
+        }
+        return swapDelta;
+    }
+
+    function executeOrder(
+        PoolKey calldata key,
+        int24 tickToSellAt,
+        bool zeroForOne,
+        uint256 inputAmount
+    ) internal {
+        int24 tick = _validTickToSwapAt(tickToSellAt, key.tickSpacing);
+
+        uint256 positionId = _getPositionId(key, tick, zeroForOne);
+
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: int256(inputAmount),
+            sqrtPriceLimitX96: zeroForOne
+                ? TickMath.MIN_SQRT_PRICE + 1
+                : TickMath.MIN_SQRT_PRICE - 1
+        });
+
+        BalanceDelta delta = swapAndSettleBalances(key, params);
+
+        pendingOrders[key.toId()][tick][zeroForOne] -= inputAmount;
+        uint256 outputToken = zeroForOne
+            ? uint256(int256(delta.amount1()))
+            : uint256(int256(delta.amount0()));
+
+        claimableOutputTokens[positionId] += outputToken;
+    }
+
+    function tryExecutingOrders(
+        PoolKey calldata key,
+        bool zeroForOne
+    ) internal returns (bool, int24) {
+        (, int24 currentTick, , ) = poolManager.getSlot0(key.toId());
+        int24 lastTick = lastTicks[key.toId()];
+
+        if (currentTick > lastTick) {
+            for (
+                int24 tick = lastTick;
+                tick < currentTick;
+                tick + key.tickSpacing
+            ) {
+                uint256 inputAmount = pendingOrders[key.toId()][tick][
+                    zeroForOne
+                ];
+                if (inputAmount > 0) {
+                    executeOrder(key, tick, zeroForOne, inputAmount);
+                }
+            }
+        } else {
+            for (
+                int24 tick = lastTick;
+                tick > currentTick;
+                tick - key.tickSpacing
+            ) {
+                uint256 inputAmount = pendingOrders[key.toId()][tick][
+                    zeroForOne
+                ];
+                if (inputAmount > 0) {
+                    executeOrder(key, tick, zeroForOne, inputAmount);
+                }
+            }
         }
     }
 
+    function afterInitialize(
+        address,
+        PoolKey calldata key,
+        uint160,
+        int24 tick,
+        bytes calldata
+    ) external override returns (bytes4) {
+        lastTicks[key.toId()] = tick;
+        return this.afterInitialize.selector;
+    }
+
+    function afterSwap(
+        address,
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata params,
+        BalanceDelta delta,
+        bytes calldata
+    ) external override returns (bytes4, int128) {
+        int24 newTick;
+        bool tryMore = true;
+
+        while (tryMore) {
+            (tryMore, newTick) = tryExecutingOrders(key, !params.zeroForOne);
+        }
+
+        return (this.afterSwap.selector, 0);
+    }
+
+    //Settle balances with Pool by paying off all unsettled amounts during the swap
     function _settle(Currency currency, uint128 amount) internal {
         poolManager.sync(currency);
         currency.transfer(address(poolManager), amount);
         poolManager.settle();
     }
 
+    //Helper function for taking out the swapped amount from Pool
     function _take(Currency currency, uint256 amount) internal {
         poolManager.take(currency, address(this), amount);
     }
 
-    function execute() public {}
-
-    function _validTickToSellAt(
+    function _validTickToSwapAt(
         int24 tickToSellAt,
         int24 tickSpacing
     ) internal pure returns (int24) {
