@@ -44,8 +44,7 @@ contract OrderBookHook is BaseHook, ERC1155 {
 
     constructor(
         IPoolManager manager,
-        string memory uri,
-        string memory symbol
+        string memory uri
     ) BaseHook(manager) ERC1155(uri) {}
 
     function getHookPermissions()
@@ -235,6 +234,7 @@ contract OrderBookHook is BaseHook, ERC1155 {
                 ];
                 if (inputAmount > 0) {
                     executeOrder(key, tick, zeroForOne, inputAmount);
+                    return (true, currentTick);
                 }
             }
         } else {
@@ -248,9 +248,11 @@ contract OrderBookHook is BaseHook, ERC1155 {
                 ];
                 if (inputAmount > 0) {
                     executeOrder(key, tick, zeroForOne, inputAmount);
+                    return (true, currentTick);
                 }
             }
         }
+        return (false, currentTick);
     }
 
     function afterInitialize(
@@ -268,7 +270,7 @@ contract OrderBookHook is BaseHook, ERC1155 {
         address,
         PoolKey calldata key,
         IPoolManager.SwapParams calldata params,
-        BalanceDelta delta,
+        BalanceDelta,
         bytes calldata
     ) external override returns (bytes4, int128) {
         int24 newTick;
