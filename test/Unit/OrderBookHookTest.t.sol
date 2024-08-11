@@ -16,6 +16,8 @@ import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {PoolIdLibrary, PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {ERC1155Holder} from "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
+import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
+import {console} from "forge-std/console.sol";
 
 contract OrderBookHookTest is Test, Deployers, ERC1155Holder {
     OrderBookHook orderBookContract;
@@ -192,5 +194,126 @@ contract OrderBookHookTest is Test, Deployers, ERC1155Holder {
         );
     }
 
-    function test_executeOrder_forZeroForOne() public {}
+    function test_executeOrder_forZeroForOne() public {
+        test_placeAnOrder();
+        bool zeroForOne = true;
+        int256 amountSepcified = 1 ether;
+        int24 tickToSellAt = 100;
+        uint256 positionId = orderBookContract._getPositionId(
+            key,
+            tickUpper1,
+            zeroForOne
+        );
+        uint256 initialClaimTokenBalance = orderBookContract.balanceOf(
+            address(this),
+            positionId
+        );
+
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: !zeroForOne,
+            amountSpecified: -amountSepcified,
+            sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
+        });
+
+        PoolSwapTest.TestSettings memory test = PoolSwapTest.TestSettings({
+            takeClaims: false,
+            settleUsingBurn: false
+        });
+        uint256 token1BalanceBeforeSwap = MockERC20(Currency.unwrap(token1))
+            .balanceOf(address(this));
+        console.log("token1BalanceBefore:", token1BalanceBeforeSwap);
+
+        swapRouter.swap(key, params, test, ZERO_BYTES);
+
+        orderBookContract.redeemSwappeTokens(
+            key,
+            tickToSellAt,
+            zeroForOne,
+            uint256(amountSepcified)
+        );
+        uint256 token1BalanceAfter = MockERC20(Currency.unwrap(token1))
+            .balanceOf(address(this));
+
+        console.log("token1BalanceAfter:", token1BalanceAfter);
+
+        uint256 claimTokenBalanceAfterRedemption = orderBookContract.balanceOf(
+            address(this),
+            positionId
+        );
+        assertEq(
+            initialClaimTokenBalance - claimTokenBalanceAfterRedemption,
+            uint256(amountSepcified)
+        );
+        assertEq(token1BalanceAfter, token1BalanceBeforeSwap);
+    }
+
+    // function executeOrder(
+    // PoolKey calldata key,
+    // int24 tickToSellAt,
+    // bool zeroForOne,
+    // uint256 inputAmount
+    // ) internal {
+    // int24 tick = _validTickToSwapAt(tickToSellAt, key.tickSpacing);
+    //
+    // uint256 positionId = _getPositionId(key, tick, zeroForOne);
+    //
+    // IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+    // zeroForOne: zeroForOne,
+    // amountSpecified: int256(inputAmount),
+    // sqrtPriceLimitX96: zeroForOne
+    // ? TickMath.MIN_SQRT_PRICE + 1
+    // : TickMath.MIN_SQRT_PRICE - 1
+    // });
+    //
+    // BalanceDelta delta = swapAndSettleBalances(key, params);
+    //
+    // pendingOrders[key.toId()][tick][zeroForOne] -= inputAmount;
+    // uint256 outputToken = zeroForOne
+    // ? uint256(int256(delta.amount1()))
+    // : uint256(int256(delta.amount0()));
+    //
+    // claimableOutputTokens[positionId] += outputToken;
+    // }
+
+    // function redeemSwappeTokens(
+    // PoolKey calldata key,
+    // int24 tickToSellAt,
+    // bool zeroForOne,
+    // uint256 inputAmountToClaimFor
+    // ) public {
+    // int24 tick = _validTickToSwapAt(tickToSellAt, key.tickSpacing);
+    //
+    // uint256 positionId = _getPositionId(key, tick, zeroForOne);
+    // if (claimableOutputTokens[positionId] == 0)
+    // revert OBH__NoClaimableOutputTokenAvailable();
+    //
+    // uint256 userInputAmount = balanceOf(msg.sender, positionId);
+    // if (inputAmountToClaimFor > userInputAmount)
+    // revert OBH__InsufficientInputBalanceToRedeem();
+    //
+    // totalClaimable Reward for userInput= totalClaimableOutput*inputAmountOfUser/totalInputAmount for this partcicular positionId
+    // uint256 totalOutputTokensAvailableAtThisPosition = claimableOutputTokens[
+    // positionId
+    // ];
+    //
+    // uint256 totalInputAmountsAtThisPosition = claimTokensSupply[positionId];
+    //
+    // _burn(msg.sender, positionId, userInputAmount);
+    //
+    // uint256 thisUserClaimableOutput = (
+    // totalOutputTokensAvailableAtThisPosition.mulDivDown(
+    // userInputAmount,
+    // totalInputAmountsAtThisPosition
+    // )
+    // );
+    //
+    // claimTokensSupply[positionId] -= inputAmountToClaimFor;
+    // claimableOutputTokens[positionId] -= thisUserClaimableOutput;
+    //
+    // Currency outputTokenAddress = zeroForOne
+    // ? key.currency1
+    // : key.currency0;
+    //
+    // outputTokenAddress.transfer(msg.sender, thisUserClaimableOutput);
+    // }
 }

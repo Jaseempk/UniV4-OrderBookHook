@@ -123,7 +123,7 @@ contract OrderBookHook is BaseHook, ERC1155 {
         emit OrderCancelled(key, tick, zeroForOne, msg.sender);
     }
 
-    function redeemOrderedTokens(
+    function redeemSwappeTokens(
         PoolKey calldata key,
         int24 tickToSellAt,
         bool zeroForOne,
@@ -227,7 +227,7 @@ contract OrderBookHook is BaseHook, ERC1155 {
             for (
                 int24 tick = lastTick;
                 tick < currentTick;
-                tick + key.tickSpacing
+                tick += key.tickSpacing
             ) {
                 uint256 inputAmount = pendingOrders[key.toId()][tick][
                     zeroForOne
@@ -241,7 +241,7 @@ contract OrderBookHook is BaseHook, ERC1155 {
             for (
                 int24 tick = lastTick;
                 tick > currentTick;
-                tick - key.tickSpacing
+                tick -= key.tickSpacing
             ) {
                 uint256 inputAmount = pendingOrders[key.toId()][tick][
                     zeroForOne
@@ -261,25 +261,29 @@ contract OrderBookHook is BaseHook, ERC1155 {
         uint160,
         int24 tick,
         bytes calldata
-    ) external override returns (bytes4) {
+    ) external override onlyByPoolManager returns (bytes4) {
         lastTicks[key.toId()] = tick;
         return this.afterInitialize.selector;
     }
 
     function afterSwap(
-        address,
+        address sender,
         PoolKey calldata key,
         IPoolManager.SwapParams calldata params,
         BalanceDelta,
         bytes calldata
-    ) external override returns (bytes4, int128) {
-        int24 newTick;
+    ) external override onlyByPoolManager returns (bytes4, int128) {
+        if (sender == address(this)) return (this.afterSwap.selector, 0);
+        int24 currentTick;
         bool tryMore = true;
 
         while (tryMore) {
-            (tryMore, newTick) = tryExecutingOrders(key, !params.zeroForOne);
+            (tryMore, currentTick) = tryExecutingOrders(
+                key,
+                !params.zeroForOne
+            );
         }
-
+        lastTicks[key.toId()] = currentTick;
         return (this.afterSwap.selector, 0);
     }
 
