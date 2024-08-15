@@ -156,6 +156,8 @@ contract OrderBookHookTest is Test, Deployers, ERC1155Holder {
         int24 tickToSellAt = 100;
         bool zeroForOne = true;
         test_placeAnOrder();
+        uint256 amountToCancel = 0.5 ether;
+
         uint256 positionId = orderBookContract._getPositionId(
             key,
             60,
@@ -169,7 +171,12 @@ contract OrderBookHookTest is Test, Deployers, ERC1155Holder {
             positionId
         );
 
-        orderBookContract.cancelOrder(key, tickToSellAt, zeroForOne);
+        orderBookContract.cancelOrder(
+            key,
+            tickToSellAt,
+            zeroForOne,
+            amountToCancel
+        );
         uint256 claimTokensSupplyAfterCancelling = orderBookContract
             .claimTokensSupply(positionId);
         uint256 token0BalanceAfterCancelling = token0.balanceOfSelf();
@@ -247,73 +254,35 @@ contract OrderBookHookTest is Test, Deployers, ERC1155Holder {
         assertEq(token1BalanceAfter, token1BalanceBeforeSwap);
     }
 
-    // function executeOrder(
-    // PoolKey calldata key,
-    // int24 tickToSellAt,
-    // bool zeroForOne,
-    // uint256 inputAmount
-    // ) internal {
-    // int24 tick = _validTickToSwapAt(tickToSellAt, key.tickSpacing);
-    //
-    // uint256 positionId = _getPositionId(key, tick, zeroForOne);
-    //
-    // IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
-    // zeroForOne: zeroForOne,
-    // amountSpecified: int256(inputAmount),
-    // sqrtPriceLimitX96: zeroForOne
-    // ? TickMath.MIN_SQRT_PRICE + 1
-    // : TickMath.MIN_SQRT_PRICE - 1
-    // });
-    //
-    // BalanceDelta delta = swapAndSettleBalances(key, params);
-    //
-    // pendingOrders[key.toId()][tick][zeroForOne] -= inputAmount;
-    // uint256 outputToken = zeroForOne
-    // ? uint256(int256(delta.amount1()))
-    // : uint256(int256(delta.amount0()));
-    //
-    // claimableOutputTokens[positionId] += outputToken;
-    // }
+    function test_executeOrder_forOneForZero() public {
+        bool _zeroForOne = false;
+        int24 tickToSellAt = 100;
+        int24 tickSpacing = 60;
+        uint256 inputAmount = 1 ether;
+        orderBookContract.placeOrder(
+            key,
+            tickToSellAt,
+            tickSpacing,
+            _zeroForOne,
+            inputAmount
+        );
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: !_zeroForOne,
+            amountSpecified: -int256(inputAmount),
+            sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+        });
 
-    // function redeemSwappeTokens(
-    // PoolKey calldata key,
-    // int24 tickToSellAt,
-    // bool zeroForOne,
-    // uint256 inputAmountToClaimFor
-    // ) public {
-    // int24 tick = _validTickToSwapAt(tickToSellAt, key.tickSpacing);
-    //
-    // uint256 positionId = _getPositionId(key, tick, zeroForOne);
-    // if (claimableOutputTokens[positionId] == 0)
-    // revert OBH__NoClaimableOutputTokenAvailable();
-    //
-    // uint256 userInputAmount = balanceOf(msg.sender, positionId);
-    // if (inputAmountToClaimFor > userInputAmount)
-    // revert OBH__InsufficientInputBalanceToRedeem();
-    //
-    // totalClaimable Reward for userInput= totalClaimableOutput*inputAmountOfUser/totalInputAmount for this partcicular positionId
-    // uint256 totalOutputTokensAvailableAtThisPosition = claimableOutputTokens[
-    // positionId
-    // ];
-    //
-    // uint256 totalInputAmountsAtThisPosition = claimTokensSupply[positionId];
-    //
-    // _burn(msg.sender, positionId, userInputAmount);
-    //
-    // uint256 thisUserClaimableOutput = (
-    // totalOutputTokensAvailableAtThisPosition.mulDivDown(
-    // userInputAmount,
-    // totalInputAmountsAtThisPosition
-    // )
-    // );
-    //
-    // claimTokensSupply[positionId] -= inputAmountToClaimFor;
-    // claimableOutputTokens[positionId] -= thisUserClaimableOutput;
-    //
-    // Currency outputTokenAddress = zeroForOne
-    // ? key.currency1
-    // : key.currency0;
-    //
-    // outputTokenAddress.transfer(msg.sender, thisUserClaimableOutput);
-    // }
+        PoolSwapTest.TestSettings memory test = PoolSwapTest.TestSettings({
+            takeClaims: false,
+            settleUsingBurn: false
+        });
+
+        swapRouter.swap(key, params, test, ZERO_BYTES);
+        orderBookContract.redeemSwappeTokens(
+            key,
+            tickToSellAt,
+            _zeroForOne,
+            inputAmount
+        );
+    }
 }
